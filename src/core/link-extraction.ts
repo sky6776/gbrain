@@ -441,7 +441,7 @@ export interface SlugResolver {
  *
  * mode: 'batch' (migration / gbrain extract) — pg_trgm only, NO search
  * fallback. On a 46K-page brain this avoids N-thousand OpenAI embedding
- * calls + Anthropic Haiku expansion calls (see operations-query-hidden-haiku
+ * calls + LLM expansion calls (see operations-query-hidden-haiku
  * learning) and keeps the backfill deterministic + under a wall-clock budget.
  *
  * mode: 'live' (put_page auto-link) — can afford the (rare, bounded) search

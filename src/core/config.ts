@@ -28,7 +28,17 @@ export interface GBrainConfig {
   database_url?: string;
   database_path?: string;
   openai_api_key?: string;
-  anthropic_api_key?: string;
+  expansion_api_key?: string;
+  expansion_base_url?: string;
+  expansion_model?: string;
+  chunker_api_key?: string;
+  chunker_base_url?: string;
+  chunker_model?: string;
+  transcription_provider?: 'groq' | 'openai';
+  transcription_groq_api_key?: string;
+  transcription_groq_base_url?: string;
+  transcription_openai_api_key?: string;
+  transcription_openai_base_url?: string;
 }
 
 /**
@@ -57,6 +67,25 @@ export function loadConfig(): GBrainConfig | null {
     engine: inferredEngine,
     ...(dbUrl ? { database_url: dbUrl } : {}),
     ...(process.env.GBRAIN_OPENAI_API_KEY ? { openai_api_key: process.env.GBRAIN_OPENAI_API_KEY } : {}),
+    ...(process.env.GBRAIN_EXPANSION_API_KEY ? {
+      expansion_api_key: process.env.GBRAIN_EXPANSION_API_KEY,
+      ...(process.env.GBRAIN_EXPANSION_BASE_URL ? { expansion_base_url: process.env.GBRAIN_EXPANSION_BASE_URL } : {}),
+      ...(process.env.GBRAIN_EXPANSION_MODEL ? { expansion_model: process.env.GBRAIN_EXPANSION_MODEL } : {}),
+    } : {}),
+    ...(process.env.GBRAIN_CHUNKER_API_KEY ? {
+      chunker_api_key: process.env.GBRAIN_CHUNKER_API_KEY,
+      ...(process.env.GBRAIN_CHUNKER_BASE_URL ? { chunker_base_url: process.env.GBRAIN_CHUNKER_BASE_URL } : {}),
+      ...(process.env.GBRAIN_CHUNKER_MODEL ? { chunker_model: process.env.GBRAIN_CHUNKER_MODEL } : {}),
+    } : {}),
+    ...(process.env.GBRAIN_TRANSCRIPTION_PROVIDER ? { transcription_provider: process.env.GBRAIN_TRANSCRIPTION_PROVIDER as 'groq' | 'openai' } : {}),
+    ...(process.env.GBRAIN_TRANSCRIPTION_GROQ_API_KEY ? {
+      transcription_groq_api_key: process.env.GBRAIN_TRANSCRIPTION_GROQ_API_KEY,
+      ...(process.env.GBRAIN_TRANSCRIPTION_GROQ_BASE_URL ? { transcription_groq_base_url: process.env.GBRAIN_TRANSCRIPTION_GROQ_BASE_URL } : {}),
+    } : {}),
+    ...(process.env.GBRAIN_TRANSCRIPTION_OPENAI_API_KEY ? {
+      transcription_openai_api_key: process.env.GBRAIN_TRANSCRIPTION_OPENAI_API_KEY,
+      ...(process.env.GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL ? { transcription_openai_base_url: process.env.GBRAIN_TRANSCRIPTION_OPENAI_BASE_URL } : {}),
+    } : {}),
   };
   return merged as GBrainConfig;
 }

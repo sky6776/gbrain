@@ -1,57 +1,61 @@
 /**
  * Query Expansion via LLM
  *
- * Uses an Anthropic-compatible API to expand user queries into
+ * Uses an OpenAI-compatible API to expand user queries into
  * alternative search terms for better recall. Falls back to the
  * original query when expansion fails (non-fatal).
  *
- * Configurable via GBRAIN_ env vars for alternative providers.
+ * Supports any OpenAI-compatible provider (Zhipu, DashScope, DeepSeek, etc.)
+ * via GBRAIN_EXPANSION_* env vars, independent from embedding provider.
  */
 
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 
-const EXPANSION_MODEL = process.env.GBRAIN_EXPANSION_MODEL || 'claude-haiku-4-5-20251001';
+const EXPANSION_MODEL = process.env.GBRAIN_EXPANSION_MODEL || '';
 const MAX_ALTERNATIVES = 5;
 
-let client: Anthropic | null = null;
+let client: OpenAI | null = null;
 
-function getClient(): Anthropic {
+function getClient(): OpenAI {
   if (!client) {
-    const options: Anthropic.ClientOptions = {
-      apiKey: process.env.GBRAIN_ANTHROPIC_API_KEY || undefined,
-    };
-    const baseURL = process.env.GBRAIN_ANTHROPIC_BASE_URL;
-    if (baseURL) {
-      options.baseURL = baseURL;
-    }
-    client = new Anthropic(options);
+    client = new OpenAI({
+      apiKey: process.env.GBRAIN_EXPANSION_API_KEY || undefined,
+      baseURL: process.env.GBRAIN_EXPANSION_BASE_URL || undefined,
+    });
   }
   return client;
 }
 
+function isExpansionConfigured(): boolean {
+  return !!(process.env.GBRAIN_EXPANSION_API_KEY && EXPANSION_MODEL);
+}
+
 export async function expandQuery(query: string): Promise<string[]> {
   try {
-    if (!process.env.GBRAIN_ANTHROPIC_API_KEY) {
+    if (!isExpansionConfigured()) {
       return [query];
     }
 
-    const response = await getClient().messages.create({
+    const response = await getClient().chat.completions.create({
       model: EXPANSION_MODEL,
       max_tokens: 256,
       tools: [
         {
-          name: 'submit_alternatives',
-          description: 'Submit alternative search queries',
-          input_schema: {
-            type: 'object' as const,
-            properties: {
-              alternatives: {
-                type: 'array',
-                items: { type: 'string' },
-                description: 'Alternative search queries that capture the same intent',
+          type: 'function' as const,
+          function: {
+            name: 'submit_alternatives',
+            description: 'Submit alternative search queries',
+            parameters: {
+              type: 'object',
+              properties: {
+                alternatives: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Alternative search queries that capture the same intent',
+                },
               },
+              required: ['alternatives'],
             },
-            required: ['alternatives'],
           },
         },
       ],
@@ -60,17 +64,19 @@ export async function expandQuery(query: string): Promise<string[]> {
           role: 'user',
           content: `Generate up to ${MAX_ALTERNATIVES} alternative search queries that capture the same intent as: "${query}".
 The alternatives should use different keywords, synonyms, or phrasings while preserving the core intent.
-Return the alternatives using the submit_alternatives tool.`,
+Return the alternatives using the submit_alternatives function.`,
         },
       ],
     });
 
-    // Extract tool use response
-    const toolUse = response.content.find(block => block.type === 'tool_use');
-    if (toolUse && toolUse.type === 'tool_use') {
-      const input = toolUse.input as { alternatives?: string[] };
-      if (input.alternatives && Array.isArray(input.alternatives)) {
-        return [...new Set([query, ...input.alternatives])].slice(0, MAX_ALTERNATIVES + 1);
+    const message = response.choices[0]?.message;
+    if (message?.tool_calls && message.tool_calls.length > 0) {
+      const toolCall = message.tool_calls[0];
+      if (toolCall.function.name === 'submit_alternatives') {
+        const input = JSON.parse(toolCall.function.arguments) as { alternatives?: string[] };
+        if (input.alternatives && Array.isArray(input.alternatives)) {
+          return [...new Set([query, ...input.alternatives])].slice(0, MAX_ALTERNATIVES + 1);
+        }
       }
     }
 
