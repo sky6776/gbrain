@@ -1,163 +1,139 @@
 /**
- * LLM-Guided Text Chunker
- * Ported from production Ruby implementation (llm_text_chunker.rb, 167 LOC)
+ * LLM-based Chunking
  *
- * Algorithm:
- *   1. Pre-split into 128-word candidates via recursive chunker
- *   2. Sliding window of 3+ candidates
- *   3. Ask Claude Haiku: "Where does the FIRST topic shift occur?"
- *   4. Max 3 retries per window on unparseable responses
- *   5. Merge candidates between split points
+ * Uses an Anthropic-compatible LLM to semantically chunk documents
+ * into topic-coherent sections. Falls back to simple chunking when
+ * the LLM is unavailable.
+ *
+ * Configurable via GBRAIN_ env vars for alternative providers.
  */
 
-import { chunkText as recursiveChunk, type TextChunk } from './recursive.ts';
+import Anthropic from '@anthropic-ai/sdk';
 
-const CANDIDATE_SIZE = 128; // words per pre-split candidate
-const MAX_RETRIES = 3;
-const WINDOW_SIZE = 5; // candidates per window
+const CHUNKER_MODEL = process.env.GBRAIN_CHUNKER_MODEL || 'claude-haiku-4-5-20251001';
 
-export interface LlmChunkOptions {
-  chunkSize?: number;
-  chunkOverlap?: number;
-  askLlm?: (prompt: string) => Promise<string>;
+let client: Anthropic | null = null;
+
+function getClient(): Anthropic {
+  if (!client) {
+    const options: Anthropic.ClientOptions = {
+      apiKey: process.env.GBRAIN_ANTHROPIC_API_KEY || undefined,
+    };
+    const baseURL = process.env.GBRAIN_ANTHROPIC_BASE_URL;
+    if (baseURL) {
+      options.baseURL = baseURL;
+    }
+    client = new Anthropic(options);
+  }
+  return client;
 }
 
-export async function chunkTextLlm(
-  text: string,
-  opts: LlmChunkOptions,
-): Promise<TextChunk[]> {
-  const chunkSize = opts.chunkSize || 300;
-  const chunkOverlap = opts.chunkOverlap || 50;
-  const askLlm = opts.askLlm;
+export interface LLMChunk {
+  content: string;
+  topic: string;
+  start_offset: number;
+  end_offset: number;
+}
 
-  if (!askLlm) {
-    return recursiveChunk(text, { chunkSize, chunkOverlap });
+export async function chunkWithLLM(
+  text: string,
+  maxChunkSize: number = 1000,
+): Promise<LLMChunk[]> {
+  if (!process.env.GBRAIN_ANTHROPIC_API_KEY) {
+    return simpleChunk(text, maxChunkSize);
   }
 
   try {
-    // Step 1: Pre-split into small candidates
-    const candidates = recursiveChunk(text, {
-      chunkSize: CANDIDATE_SIZE,
-      chunkOverlap: 0,
+    const response = await getClient().messages.create({
+      model: CHUNKER_MODEL,
+      max_tokens: 4096,
+      tools: [
+        {
+          name: 'submit_chunks',
+          description: 'Submit the semantically chunked document sections',
+          input_schema: {
+            type: 'object' as const,
+            properties: {
+              chunks: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    topic: { type: 'string', description: 'Topic or heading for this section' },
+                    content: { type: 'string', description: 'The text content of this section' },
+                  },
+                  required: ['topic', 'content'],
+                },
+              },
+            },
+            required: ['chunks'],
+          },
+        },
+      ],
+      messages: [
+        {
+          role: 'user',
+          content: `Analyze the following document and break it into semantically coherent chunks. Each chunk should cover a single topic or section. The maximum size for each chunk is approximately ${maxChunkSize} characters.
+
+Document:
+---
+${text.slice(0, 50000)}
+---
+
+Use the submit_chunks tool to return the chunks.`,
+        },
+      ],
     });
 
-    if (candidates.length <= 2) {
-      return recursiveChunk(text, { chunkSize, chunkOverlap });
+    const toolUse = response.content.find(block => block.type === 'tool_use');
+    if (toolUse && toolUse.type === 'tool_use') {
+      const input = toolUse.input as { chunks?: Array<{ topic: string; content: string }> };
+      if (input.chunks && Array.isArray(input.chunks)) {
+        return input.chunks.map(chunk => ({
+          content: chunk.content,
+          topic: chunk.topic,
+          start_offset: 0,
+          end_offset: chunk.content.length,
+        }));
+      }
     }
 
-    // Step 2: Find split points via LLM
-    const splitPoints = await findSplitPoints(candidates, askLlm);
-
-    // Step 3: Merge candidates between split points
-    const merged = mergeAtSplits(candidates, splitPoints);
-
-    return merged.map((t, i) => ({ text: t.trim(), index: i }));
-  } catch {
-    return recursiveChunk(text, { chunkSize, chunkOverlap });
+    return simpleChunk(text, maxChunkSize);
+  } catch (e) {
+    // LLM chunking is non-fatal, fall back to simple chunking
+    return simpleChunk(text, maxChunkSize);
   }
 }
 
-async function findSplitPoints(
-  candidates: TextChunk[],
-  askLlm: (prompt: string) => Promise<string>,
-): Promise<number[]> {
-  const splitPoints: number[] = [];
-  let pos = 0;
+function simpleChunk(text: string, maxChunkSize: number): LLMChunk[] {
+  const chunks: LLMChunk[] = [];
+  let offset = 0;
 
-  while (pos < candidates.length - 1) {
-    const windowEnd = Math.min(pos + WINDOW_SIZE, candidates.length);
-    const window = candidates.slice(pos, windowEnd);
+  while (offset < text.length) {
+    let end = Math.min(offset + maxChunkSize, text.length);
 
-    if (window.length < 2) break;
-
-    const splitAt = await askForSplit(window, pos, askLlm);
-
-    if (splitAt !== null && splitAt > pos) {
-      splitPoints.push(splitAt);
-      pos = splitAt;
-    } else {
-      // No split found in this window, advance by 1
-      pos++;
+    // Try to break at paragraph or sentence boundary
+    if (end < text.length) {
+      const paragraphBreak = text.lastIndexOf('\n\n', end);
+      if (paragraphBreak > offset + maxChunkSize * 0.3) {
+        end = paragraphBreak;
+      } else {
+        const sentenceBreak = text.lastIndexOf('. ', end);
+        if (sentenceBreak > offset + maxChunkSize * 0.3) {
+          end = sentenceBreak + 1;
+        }
+      }
     }
+
+    chunks.push({
+      content: text.slice(offset, end).trim(),
+      topic: 'Untitled Section',
+      start_offset: offset,
+      end_offset: end,
+    });
+
+    offset = end;
   }
 
-  return splitPoints;
-}
-
-async function askForSplit(
-  window: TextChunk[],
-  offset: number,
-  askLlm: (prompt: string) => Promise<string>,
-): Promise<number | null> {
-  // Format candidates as numbered items
-  const numbered = window
-    .map((c, i) => `[${offset + i}] ${c.text.slice(0, 200)}${c.text.length > 200 ? '...' : ''}`)
-    .join('\n\n');
-
-  const prompt = `You are analyzing a document that has been split into numbered segments. Your job is to find where the FIRST major topic shift occurs.
-
-Here are the segments:
-
-${numbered}
-
-If there is a clear topic shift between any two adjacent segments, respond with ONLY the number of the segment where the NEW topic begins. For example, if the topic shifts between [${offset + 1}] and [${offset + 2}], respond with: ${offset + 2}
-
-If there is no clear topic shift, respond with: NONE
-
-Respond with only a number or NONE. Nothing else.`;
-
-  for (let retry = 0; retry < MAX_RETRIES; retry++) {
-    try {
-      const response = await askLlm(prompt);
-      const parsed = parseSplitResponse(response, offset, offset + window.length - 1);
-      return parsed;
-    } catch {
-      continue;
-    }
-  }
-
-  return null;
-}
-
-function parseSplitResponse(
-  response: string,
-  minId: number,
-  maxId: number,
-): number | null {
-  const trimmed = response.trim().toUpperCase();
-  if (trimmed === 'NONE') return null;
-
-  const num = parseInt(trimmed, 10);
-  if (isNaN(num)) return null;
-
-  // Clamp to valid range, ensure forward progress
-  const clamped = Math.max(num, minId + 1);
-  if (clamped > maxId) return null;
-
-  return clamped;
-}
-
-function mergeAtSplits(candidates: TextChunk[], splitPoints: number[]): string[] {
-  if (splitPoints.length === 0) {
-    return [candidates.map(c => c.text).join(' ')];
-  }
-
-  const result: string[] = [];
-  let start = 0;
-
-  for (const split of splitPoints) {
-    const group = candidates.slice(start, split);
-    if (group.length > 0) {
-      result.push(group.map(c => c.text).join(' '));
-    }
-    start = split;
-  }
-
-  // Last group
-  const remaining = candidates.slice(start);
-  if (remaining.length > 0) {
-    result.push(remaining.map(c => c.text).join(' '));
-  }
-
-  return result.filter(t => t.trim().length > 0);
+  return chunks;
 }

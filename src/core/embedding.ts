@@ -2,15 +2,16 @@
  * Embedding Service
  * Ported from production Ruby implementation (embedding_service.rb, 190 LOC)
  *
- * OpenAI text-embedding-3-large at 1536 dimensions.
+ * Default: OpenAI text-embedding-3-large at 1536 dimensions.
+ * Configurable via GBRAIN_ env vars for alternative providers (e.g. DashScope, Zhipu).
  * Retry with exponential backoff (4s base, 120s cap, 5 retries).
  * 8000 character input truncation.
  */
 
 import OpenAI from 'openai';
 
-const MODEL = 'text-embedding-3-large';
-const DIMENSIONS = 1536;
+const MODEL = process.env.GBRAIN_EMBEDDING_MODEL || 'text-embedding-3-large';
+const DIMENSIONS = parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS || '1536', 10);
 const MAX_CHARS = 8000;
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 4000;
@@ -21,7 +22,10 @@ let client: OpenAI | null = null;
 
 function getClient(): OpenAI {
   if (!client) {
-    client = new OpenAI();
+    client = new OpenAI({
+      apiKey: process.env.GBRAIN_OPENAI_API_KEY || undefined,
+      baseURL: process.env.GBRAIN_OPENAI_BASE_URL || undefined,
+    });
   }
   return client;
 }
