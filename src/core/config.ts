@@ -135,3 +135,57 @@ export function getDbUrlSource(): DbUrlSource {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Per-module config helpers (with OPENAI_API_KEY fallback)
+// ---------------------------------------------------------------------------
+
+export interface ExpansionConfig {
+  apiKey?: string;
+  baseURL?: string;
+  model?: string;
+}
+
+export interface ChunkerConfig {
+  apiKey?: string;
+  baseURL?: string;
+  model?: string;
+}
+
+/**
+ * Resolve expansion config: GBRAIN_EXPANSION_* > OPENAI_API_KEY fallback.
+ * GBRAIN_ prefixed env vars take precedence; OPENAI_API_KEY is the
+ * backward-compatible fallback for users who haven't migrated yet.
+ */
+export function getExpansionConfig(): ExpansionConfig {
+  const apiKey =
+    process.env.GBRAIN_EXPANSION_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    undefined;
+  const baseURL =
+    process.env.GBRAIN_EXPANSION_BASE_URL ||
+    process.env.GBRAIN_OPENAI_BASE_URL ||
+    undefined;
+  const model =
+    process.env.GBRAIN_EXPANSION_MODEL ||
+    undefined;
+  return { apiKey, baseURL, model };
+}
+
+/**
+ * Resolve chunker config: GBRAIN_CHUNKER_* > OPENAI_API_KEY fallback.
+ */
+export function getChunkerConfig(): ChunkerConfig {
+  const apiKey =
+    process.env.GBRAIN_CHUNKER_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    undefined;
+  const baseURL =
+    process.env.GBRAIN_CHUNKER_BASE_URL ||
+    process.env.GBRAIN_OPENAI_BASE_URL ||
+    undefined;
+  const model =
+    process.env.GBRAIN_CHUNKER_MODEL ||
+    undefined;
+  return { apiKey, baseURL, model };
+}

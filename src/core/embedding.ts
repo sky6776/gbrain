@@ -11,7 +11,16 @@
 import OpenAI from 'openai';
 
 const MODEL = process.env.GBRAIN_EMBEDDING_MODEL || 'text-embedding-3-large';
-const DIMENSIONS = parseInt(process.env.GBRAIN_EMBEDDING_DIMENSIONS || '1536', 10);
+const DIMENSIONS = (() => {
+  const raw = process.env.GBRAIN_EMBEDDING_DIMENSIONS;
+  if (!raw) return 1536;
+  const parsed = parseInt(raw, 10);
+  if (isNaN(parsed) || parsed <= 0) {
+    console.warn(`[gbrain] GBRAIN_EMBEDDING_DIMENSIONS="${raw}" is invalid, falling back to 1536`);
+    return 1536;
+  }
+  return parsed;
+})();
 const MAX_CHARS = 8000;
 const MAX_RETRIES = 5;
 const BASE_DELAY_MS = 4000;

@@ -39,6 +39,7 @@
     "@electric-sql/pglite": "0.4.3",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "gray-matter": "^4.0.3",
+    "groq-sdk": "^0.15.0",
     "marked": "^18.0.0",
     "openai": "^4.0.0",
     "pgvector": "^0.2.0",
@@ -50,5 +51,9 @@
   "trustedDependencies": [
     "@electric-sql/pglite"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "private": true,
+  "peerDependencies": {
+    "typescript": "^5"
+  }
 }

@@ -1,148 +1,116 @@
 /**
- * LLM-based Chunking
+ * LLM-guided chunking: use an LLM to identify natural section boundaries
+ * in a document, then split at those boundaries.
  *
- * Uses an OpenAI-compatible LLM to semantically chunk documents
- * into topic-coherent sections. Falls back to simple chunking when
- * the LLM is unavailable.
- *
- * Supports any OpenAI-compatible provider (Zhipu, DashScope, DeepSeek, etc.)
- * via GBRAIN_CHUNKER_* env vars, independent from other providers.
+ * Uses OpenAI-compatible SDK so any provider (OpenAI, Zhipu, DashScope,
+ * DeepSeek, etc.) can be used via GBRAIN_CHUNKER_* env vars.
+ * Falls back to OPENAI_API_KEY for backward compatibility.
  */
 
 import OpenAI from 'openai';
+import { getChunkerConfig } from '../config.js';
 
-const CHUNKER_MODEL = process.env.GBRAIN_CHUNKER_MODEL || '';
+export interface LLMChunk {
+  heading: string;
+  content: string;
+  startLine: number;
+  endLine: number;
+}
 
 let client: OpenAI | null = null;
 
 function getClient(): OpenAI {
   if (!client) {
+    const cfg = getChunkerConfig();
     client = new OpenAI({
-      apiKey: process.env.GBRAIN_CHUNKER_API_KEY || undefined,
-      baseURL: process.env.GBRAIN_CHUNKER_BASE_URL || undefined,
+      apiKey: cfg.apiKey || undefined,
+      baseURL: cfg.baseURL || undefined,
     });
   }
   return client;
 }
 
 function isChunkerConfigured(): boolean {
-  return !!(process.env.GBRAIN_CHUNKER_API_KEY && CHUNKER_MODEL);
+  const cfg = getChunkerConfig();
+  return !!(cfg.apiKey && cfg.model);
 }
 
-export interface LLMChunk {
-  content: string;
-  topic: string;
-  start_offset: number;
-  end_offset: number;
-}
-
-export async function chunkWithLLM(
+/**
+ * Use an LLM to identify natural section boundaries in a document.
+ * Returns an array of chunks with headings and line ranges.
+ */
+export async function llmChunk(
   text: string,
-  maxChunkSize: number = 1000,
+  opts?: { maxChunks?: number },
 ): Promise<LLMChunk[]> {
   if (!isChunkerConfigured()) {
-    return simpleChunk(text, maxChunkSize);
+    // Fallback: treat the entire text as a single chunk
+    const lines = text.split('\n');
+    return [{
+      heading: 'Document',
+      content: text,
+      startLine: 1,
+      endLine: lines.length,
+    }];
   }
+
+  const cfg = getChunkerConfig();
+  const maxChunks = opts?.maxChunks ?? 20;
 
   try {
     const response = await getClient().chat.completions.create({
-      model: CHUNKER_MODEL,
-      max_tokens: 4096,
-      tools: [
-        {
-          type: 'function' as const,
-          function: {
-            name: 'submit_chunks',
-            description: 'Submit the semantically chunked document sections',
-            parameters: {
-              type: 'object',
-              properties: {
-                chunks: {
-                  type: 'array',
-                  items: {
-                    type: 'object',
-                    properties: {
-                      topic: { type: 'string', description: 'Topic or heading for this section' },
-                      content: { type: 'string', description: 'The text content of this section' },
-                    },
-                    required: ['topic', 'content'],
-                  },
-                },
-              },
-              required: ['chunks'],
-            },
-          },
-        },
-      ],
+      model: cfg.model!,
       messages: [
         {
+          role: 'system',
+          content:
+            'You are a document structure analyzer. Given a document, identify its natural sections. ' +
+            'Return a JSON array of objects with "heading", "startLine", and "endLine" fields. ' +
+            'Lines are 1-indexed. Do not overlap sections. Cover the entire document.',
+        },
+        {
           role: 'user',
-          content: `Analyze the following document and break it into semantically coherent chunks. Each chunk should cover a single topic or section. The maximum size for each chunk is approximately ${maxChunkSize} characters.
-
-Document:
----
-${text.slice(0, 50000)}
----
-
-Use the submit_chunks function to return the chunks.`,
+          content: text,
         },
       ],
+      max_tokens: 2000,
+      temperature: 0,
     });
 
-    const message = response.choices[0]?.message;
-    if (message?.tool_calls && message.tool_calls.length > 0) {
-      const toolCall = message.tool_calls[0];
-      if (toolCall.function.name === 'submit_chunks') {
-        const input = JSON.parse(toolCall.function.arguments) as {
-          chunks?: Array<{ topic: string; content: string }>;
-        };
-        if (input.chunks && Array.isArray(input.chunks)) {
-          return input.chunks.map(chunk => ({
-            content: chunk.content,
-            topic: chunk.topic,
-            start_offset: 0,
-            end_offset: chunk.content.length,
-          }));
-        }
-      }
+    const content = response.choices?.[0]?.message?.content ?? '';
+    // Extract JSON from the response (may be wrapped in markdown code block)
+    const jsonMatch = content.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      // Fallback to single chunk
+      const lines = text.split('\n');
+      return [{
+        heading: 'Document',
+        content: text,
+        startLine: 1,
+        endLine: lines.length,
+      }];
     }
 
-    return simpleChunk(text, maxChunkSize);
-  } catch (e) {
-    // LLM chunking is non-fatal, fall back to simple chunking
-    return simpleChunk(text, maxChunkSize);
+    const parsed = JSON.parse(jsonMatch[0]) as Array<{ heading?: string; startLine?: number; endLine?: number }>;
+    const lines = text.split('\n');
+
+    return parsed
+      .filter(c => c.heading && c.startLine && c.endLine)
+      .slice(0, maxChunks)
+      .map(c => ({
+        heading: c.heading!,
+        content: lines.slice((c.startLine! - 1), c.endLine!).join('\n'),
+        startLine: c.startLine!,
+        endLine: c.endLine!,
+      }));
+  } catch (err) {
+    // LLM chunking is best-effort; fall back to single chunk
+    const lines = text.split('\n');
+    return [{
+      heading: 'Document',
+      content: text,
+      startLine: 1,
+      endLine: lines.length,
+    }];
   }
-}
-
-function simpleChunk(text: string, maxChunkSize: number): LLMChunk[] {
-  const chunks: LLMChunk[] = [];
-  let offset = 0;
-
-  while (offset < text.length) {
-    let end = Math.min(offset + maxChunkSize, text.length);
-
-    // Try to break at paragraph or sentence boundary
-    if (end < text.length) {
-      const paragraphBreak = text.lastIndexOf('\n\n', end);
-      if (paragraphBreak > offset + maxChunkSize * 0.3) {
-        end = paragraphBreak;
-      } else {
-        const sentenceBreak = text.lastIndexOf('. ', end);
-        if (sentenceBreak > offset + maxChunkSize * 0.3) {
-          end = sentenceBreak + 1;
-        }
-      }
-    }
-
-    chunks.push({
-      content: text.slice(offset, end).trim(),
-      topic: 'Untitled Section',
-      start_offset: offset,
-      end_offset: end,
-    });
-
-    offset = end;
-  }
-
-  return chunks;
 }

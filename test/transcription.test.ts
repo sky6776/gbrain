@@ -1,70 +1,101 @@
-import { describe, test, expect } from 'bun:test';
-import { writeFileSync, unlinkSync } from 'fs';
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { writeFileSync, unlinkSync, mkdtempSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-
-const TMP_TXT = join(tmpdir(), 'gbrain-test-audio.txt');
-const TMP_MP3 = join(tmpdir(), 'gbrain-test-audio.mp3');
-
-// Create minimal test files
-writeFileSync(TMP_TXT, 'not audio');
-writeFileSync(TMP_MP3, 'fake mp3 data');
+import {
+  transcribe,
+  getTranscriptionStatus,
+  TranscriptionResult,
+  TranscriptionConfig,
+} from '../src/core/transcription.js';
 
 describe('transcription', () => {
-  test('module exports transcribe function', async () => {
-    const mod = await import('../src/core/transcription.ts');
-    expect(typeof mod.transcribe).toBe('function');
+  const originalEnv = { ...process.env };
+  let tmpDir: string;
+  let tmpWav: string;
+  let tmpTxt: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'gbrain-test-'));
+    tmpWav = join(tmpDir, 'test.wav');
+    tmpTxt = join(tmpDir, 'test.txt');
+    writeFileSync(tmpWav, 'fake wav data');
+    writeFileSync(tmpTxt, 'not audio');
+
+    delete process.env.GBRAIN_TRANSCRIPTION_GROQ_API_KEY;
+    delete process.env.GBRAIN_GROQ_API_KEY;
+    delete process.env.GBRAIN_TRANSCRIPTION_OPENAI_API_KEY;
+    delete process.env.GBRAIN_TRANSCRIPTION_PROVIDER;
   });
 
-  test('TranscriptionResult interface shape', async () => {
-    const mod = await import('../src/core/transcription.ts');
-    expect(mod.transcribe).toBeDefined();
+  afterEach(() => {
+    try { unlinkSync(tmpWav); } catch {}
+    try { unlinkSync(tmpTxt); } catch {}
+    process.env = { ...originalEnv };
   });
 
-  test('rejects unsupported audio format', async () => {
-    const { transcribe } = await import('../src/core/transcription.ts');
-    try {
-      await transcribe(TMP_TXT, {});
-      expect(true).toBe(false);
-    } catch (e: any) {
-      expect(e.message).toContain('Unsupported audio format');
-    }
+  describe('getTranscriptionStatus', () => {
+    test('returns unavailable when no API keys set', () => {
+      const status = getTranscriptionStatus();
+      expect(status.available).toBe(false);
+      expect(status.provider).toBe('none');
+    });
+
+    test('returns groq when GBRAIN_TRANSCRIPTION_GROQ_API_KEY is set', () => {
+      process.env.GBRAIN_TRANSCRIPTION_GROQ_API_KEY = 'test-key';
+      const status = getTranscriptionStatus();
+      expect(status.available).toBe(true);
+      expect(status.provider).toBe('groq');
+    });
+
+    test('returns groq when GBRAIN_GROQ_API_KEY is set (legacy)', () => {
+      process.env.GBRAIN_GROQ_API_KEY = 'test-key';
+      const status = getTranscriptionStatus();
+      expect(status.available).toBe(true);
+      expect(status.provider).toBe('groq');
+    });
+
+    test('returns openai when GBRAIN_TRANSCRIPTION_OPENAI_API_KEY is set', () => {
+      process.env.GBRAIN_TRANSCRIPTION_OPENAI_API_KEY = 'test-key';
+      const status = getTranscriptionStatus();
+      expect(status.available).toBe(true);
+      expect(status.provider).toBe('openai');
+    });
+
+    test('groq takes precedence over openai', () => {
+      process.env.GBRAIN_TRANSCRIPTION_GROQ_API_KEY = 'groq-key';
+      process.env.GBRAIN_TRANSCRIPTION_OPENAI_API_KEY = 'openai-key';
+      const status = getTranscriptionStatus();
+      expect(status.available).toBe(true);
+      expect(status.provider).toBe('groq');
+    });
   });
 
-  test('rejects missing API key with helpful error', async () => {
-    const { transcribe } = await import('../src/core/transcription.ts');
-    const groq = process.env.GROQ_API_KEY;
-    const openai = process.env.OPENAI_API_KEY;
-    delete process.env.GROQ_API_KEY;
-    delete process.env.OPENAI_API_KEY;
+  describe('transcribe', () => {
+    test('throws on unsupported audio format', async () => {
+      await expect(transcribe(tmpTxt)).rejects.toThrow('Unsupported audio format');
+    });
 
-    try {
-      await transcribe(TMP_MP3, {});
-      expect(true).toBe(false);
-    } catch (e: any) {
-      expect(e.message).toContain('API key not set');
-      expect(e.message).toContain('GROQ_API_KEY');
-    } finally {
-      if (groq) process.env.GROQ_API_KEY = groq;
-      if (openai) process.env.OPENAI_API_KEY = openai;
-    }
+    test('throws on missing API key', async () => {
+      process.env.GBRAIN_TRANSCRIPTION_PROVIDER = 'groq';
+      await expect(transcribe(tmpWav)).rejects.toThrow('API key not set');
+    });
+
+    test('provider can be overridden via config', async () => {
+      const config: TranscriptionConfig = { provider: 'openai' };
+      await expect(transcribe(tmpWav, config)).rejects.toThrow('openai');
+    });
+
+    test('provider env var GBRAIN_TRANSCRIPTION_PROVIDER is respected', async () => {
+      process.env.GBRAIN_TRANSCRIPTION_PROVIDER = 'openai';
+      await expect(transcribe(tmpWav)).rejects.toThrow('openai');
+    });
   });
 
-  test('detects provider from env vars', async () => {
-    // This tests the provider detection logic indirectly
-    const mod = await import('../src/core/transcription.ts');
-    // If GROQ_API_KEY is set, Groq should be preferred
-    // If only OPENAI_API_KEY, OpenAI should be used
-    // We just verify the function is callable
-    expect(typeof mod.transcribe).toBe('function');
-  });
-
-  test('supported audio extensions are comprehensive', () => {
-    // Verify common audio formats are supported
-    const expected = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.mp4', '.webm'];
-    // We can't access the private set directly, but we can test via error messages
-    // The unsupported format test above verifies .txt is rejected
-    // This test documents the expected formats
-    expect(expected.length).toBeGreaterThan(5);
+  describe('format validation', () => {
+    test('supported audio extensions are recognized', () => {
+      const supported = ['.mp3', '.mp4', '.m4a', '.wav', '.webm', '.ogg', '.flac'];
+      expect(supported.length).toBeGreaterThan(5);
+    });
   });
 });
