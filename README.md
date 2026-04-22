@@ -230,6 +230,25 @@ If anything's off, `actions[]` tells you the exact command to run. For deeper tr
 
 Moving gateway crons to Minions (deterministic scripts, zero LLM tokens per fire): [`docs/guides/minions-shell-jobs.md`](docs/guides/minions-shell-jobs.md).
 
+## Durable agents: `gbrain agent` (v0.15)
+
+Your subagent runs survive crashes now. OpenClaw died mid-run? The worker re-claims on restart and replays from the last committed turn. Fan-out across 50 shards, one shard crashes — the aggregator still claims after every child reaches a terminal state and writes a mixed-outcome summary. Tool calls persist as a two-phase ledger (`pending` → `complete | failed`) so replay is safe by construction, not by hope.
+
+```bash
+# Submit a single-subagent run
+gbrain agent run "summarize my last 10 journal pages"
+
+# Fan out N prompts across N subagent children + 1 aggregator
+gbrain agent run "analyze every page" \
+  --fanout-manifest manifests/pages.json \
+  --subagent-def analyzer
+
+# Tail a running job (heartbeat per turn + full transcript on completion)
+gbrain agent logs 1247 --follow --since 5m
+```
+
+Durability is the point: every Anthropic turn commits to `subagent_messages`, every tool call to `subagent_tool_executions`. Worker kills, OpenClaw crashes, timeouts — all resumable. Host repos (your OpenClaw, etc.) ship their own subagent definitions via `GBRAIN_PLUGIN_PATH` + a `gbrain.plugin.json` manifest: see [`docs/guides/plugin-authors.md`](docs/guides/plugin-authors.md). Requires `ANTHROPIC_API_KEY` on the worker.
+
 ## Skillify: your skills tree stops being a black box
 
 Hermes and similar agent frameworks auto-create skills as a background behavior. Fine until you don't know what the agent shipped. Checklists decay. Tests drift. Resolver entries get stale. Six months later you've got an opaque pile of "skills" that nobody has read, nobody has tested, and nobody is sure still work.

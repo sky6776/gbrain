@@ -43,6 +43,8 @@ strict behavior when unset.
 - `src/commands/eval.ts` — `gbrain eval` command: single-run table + A/B config comparison
 - `src/core/embedding.ts` — OpenAI text-embedding-3-large, batch, retry, backoff
 - `src/core/check-resolvable.ts` — Resolver validation: reachability, MECE overlap, DRY checks, structured fix objects. v0.14.1: `CROSS_CUTTING_PATTERNS.conventions` is an array (notability gate accepts both `conventions/quality.md` and `_brain-filing-rules.md`). New `extractDelegationTargets()` parses `> **Convention:**`, `> **Filing rule:**`, and inline backtick references. DRY suppression is proximity-based via `DRY_PROXIMITY_LINES = 40`.
+- `src/core/repo-root.ts` — Shared `findRepoRoot(startDir?)` (v0.16.4): walks up from `startDir` (default `process.cwd()`) looking for `skills/RESOLVER.md`. Zero-dependency module imported by both `doctor.ts` and `check-resolvable.ts`. Parameterized `startDir` makes tests hermetic.
+- `src/commands/check-resolvable.ts` — Standalone CLI wrapper (v0.16.4) over `checkResolvable()`. Exports `parseFlags`, `resolveSkillsDir`, `DEFERRED`, `runCheckResolvable`. Exit rule: **1 on any issue (warnings OR errors)**, stricter than doctor's `ok` flag — honors README:259. Stable JSON envelope `{ok, skillsDir, report, autoFix, deferred, error, message}` — same shape on success and error paths. `--fix` path runs `autoFixDryViolations` BEFORE `checkResolvable` (same ordering as doctor). `deferred[]` array surfaces pending Checks 5 (trigger routing eval) and 6 (brain filing) with issue URLs. `scripts/skillify-check.ts` subprocess-calls `gbrain check-resolvable --json` (cached per process) and fails loud on binary-missing — no silent false-pass.
 - `src/core/dry-fix.ts` — `gbrain doctor --fix` engine. `autoFixDryViolations(fixes, {dryRun})` rewrites inlined rules to `> **Convention:** see [path](path).` callouts via three shape-aware expanders (bullet / blockquote / paragraph). Five guards: working-tree-dirty (`getWorkingTreeStatus()` returns 3-state `'clean' | 'dirty' | 'not_a_repo'`), no-git-backup, inside-code-fence, already-delegated (40-line proximity, consistent with detector), ambiguous-multi-match, block-is-callout. `execFileSync` array args (no shell — no injection surface). EOF newline preserved.
 - `src/core/backoff.ts` — Adaptive load-aware throttling: CPU/memory checks, exponential backoff, active hours multiplier
 - `src/core/fail-improve.ts` — Deterministic-first, LLM-fallback loop with JSONL failure logging and auto-test generation
@@ -59,8 +61,19 @@ strict behavior when unset.
 - `src/core/minions/protected-names.ts` — side-effect-free constant module exporting `PROTECTED_JOB_NAMES` + `isProtectedJobName()`. Kept pure so queue core can import without loading handler modules.
 - `src/core/minions/handlers/shell.ts` — `shell` job handler. Spawns `/bin/sh -c cmd` (absolute path, PATH-override-safe) or `argv[0] argv[1..]` (no shell). Env allowlist: `PATH, HOME, USER, LANG, TZ, NODE_ENV` + caller `env:` overrides. UTF-8-safe stdout/stderr tail via `string_decoder.StringDecoder`. Abort (either `ctx.signal` or `ctx.shutdownSignal`) fires SIGTERM → 5s grace → SIGKILL on child. Requires `GBRAIN_ALLOW_SHELL_JOBS=1` on worker (gated by `registerBuiltinHandlers`).
 - `src/core/minions/handlers/shell-audit.ts` — per-submission JSONL audit trail at `~/.gbrain/audit/shell-jobs-YYYY-Www.jsonl` (ISO-week rotation; override via `GBRAIN_AUDIT_DIR`). Best-effort: `mkdirSync(recursive)` + `appendFileSync`; failures logged to stderr, submission not blocked. Logs cmd (first 80 chars) or argv (JSON array). Never logs env values.
+- `src/core/minions/handlers/subagent.ts` (v0.15) — LLM-loop handler. Two-phase tool persistence (pending → complete/failed), replay reconciliation for mid-dispatch crashes, dual-signal abort (`ctx.signal` + `ctx.shutdownSignal`), Anthropic prompt caching on system + tool defs. `makeSubagentHandler({engine, client?, ...})` factory; `MessagesClient` is an injectable interface the real SDK implements structurally. Throws `RateLeaseUnavailableError` (renewable) when rate-lease capacity is full.
+- `src/core/minions/handlers/subagent-aggregator.ts` (v0.15) — `subagent_aggregator` handler. Claims AFTER all children resolve (queue changes guarantee every terminal child posts a `child_done` inbox message with outcome). Reads inbox via `ctx.readInbox()`, builds deterministic mixed-outcome markdown summary. No LLM call in v0.15.
+- `src/core/minions/handlers/subagent-audit.ts` (v0.15) — JSONL audit + heartbeat writer at `~/.gbrain/audit/subagent-jobs-YYYY-Www.jsonl`. Events: `submission` (one line per submit) + `heartbeat` (per turn boundary: `llm_call_started | llm_call_completed | tool_called | tool_result | tool_failed`). Never logs prompts or tool inputs. `readSubagentAuditForJob(jobId, {sinceIso})` is the readback path for `gbrain agent logs`.
+- `src/core/minions/rate-leases.ts` (v0.15) — lease-based concurrency cap for outbound providers (default key `anthropic:messages`, max via `GBRAIN_ANTHROPIC_MAX_INFLIGHT`). Owner-tagged rows with `expires_at` auto-prune on acquire; `pg_advisory_xact_lock` guards check-then-insert; CASCADE on owning job deletion. `renewLeaseWithBackoff` retries 3x (250/500/1000ms).
+- `src/core/minions/wait-for-completion.ts` (v0.15) — poll-until-terminal helper for CLI callers. `TimeoutError` does NOT cancel the job; `AbortSignal` exits without throwing. Default `pollMs`: 1000 on Postgres, 250 on PGLite inline.
+- `src/core/minions/transcript.ts` (v0.15) — renders `subagent_messages` + `subagent_tool_executions` to markdown. Tool rows splice under their owning assistant `tool_use` by `tool_use_id`. UTF-8-safe truncation; unknown block types fall through to fenced JSON.
+- `src/core/minions/plugin-loader.ts` (v0.15) — `GBRAIN_PLUGIN_PATH` discovery. Absolute paths only, left-wins collision, `gbrain.plugin.json` with `plugin_version: "gbrain-plugin-v1"`, plugins ship DEFS only (no new tools), `allowed_tools:` validated at load time against the derived registry.
+- `src/core/minions/tools/brain-allowlist.ts` (v0.15) — derives subagent tool registry from `src/core/operations.ts`. 11-name allow-list: `query`, `search`, `get_page`, `list_pages`, `file_list`, `file_url`, `get_backlinks`, `traverse_graph`, `resolve_slugs`, `get_ingest_log`, `put_page`. `put_page` schema is namespace-wrapped per subagent (`^wiki/agents/<subagentId>/.+`); the `put_page` op's server-side check is the authoritative gate via `ctx.viaSubagent` fail-closed.
+- `src/mcp/tool-defs.ts` (v0.15) — extracted `buildToolDefs(ops)` helper. MCP server + subagent tool registry both call it; byte-for-byte equivalence pinned by `test/mcp-tool-defs.test.ts`.
 - `src/core/minions/attachments.ts` — Attachment validation (path traversal, null byte, oversize, base64, duplicate detection)
-- `src/commands/jobs.ts` — `gbrain jobs` CLI subcommands + `gbrain jobs work` daemon. v0.13.1 surfaces the full `MinionJobInput` retry/backoff/timeout/idempotency surface as first-class CLI flags on `jobs submit`: `--max-stalled`, `--backoff-type fixed|exponential`, `--backoff-delay`, `--backoff-jitter`, `--timeout-ms`, `--idempotency-key`. `jobs smoke --sigkill-rescue` is the opt-in regression guard for #219.
+- `src/commands/agent.ts` (v0.16) — `gbrain agent run <prompt> [flags]` CLI. Submits `subagent` (or N children + 1 aggregator) under `{allowProtectedSubmit: true}`. Single-entry `--fanout-manifest` short-circuits. Children get `on_child_fail: 'continue'` + `max_stalled: 3`. `--follow` is the default on TTY; streams logs + polls `waitForCompletion` in parallel. Ctrl-C detaches, does not cancel.
+- `src/commands/agent-logs.ts` (v0.16) — `gbrain agent logs <job> [--follow] [--since]`. Merges JSONL heartbeat audit + `subagent_messages` into a chronological timeline. `parseSince` accepts ISO-8601 or relative (`5m`, `1h`, `2d`). Transcript tail renders only for terminal jobs.
+- `src/commands/jobs.ts` — `gbrain jobs` CLI subcommands + `gbrain jobs work` daemon. v0.13.1 surfaces the full `MinionJobInput` retry/backoff/timeout/idempotency surface as first-class CLI flags on `jobs submit`: `--max-stalled`, `--backoff-type fixed|exponential`, `--backoff-delay`, `--backoff-jitter`, `--timeout-ms`, `--idempotency-key`. `jobs smoke --sigkill-rescue` is the opt-in regression guard for #219. v0.16 wires `registerBuiltinHandlers` to always register `subagent` + `subagent_aggregator` (no env flag — `ANTHROPIC_API_KEY` is the natural cost gate, trust is via `PROTECTED_JOB_NAMES`) and loads `GBRAIN_PLUGIN_PATH` plugins at worker startup with a loud startup-line per plugin. `shell` handler still gated by `GBRAIN_ALLOW_SHELL_JOBS=1` (RCE surface, separate concern).
 - `src/commands/features.ts` — `gbrain features --json --auto-fix`: usage scan + feature adoption salesman
 - `src/commands/autopilot.ts` — `gbrain autopilot --install`: self-maintaining brain daemon (sync+extract+embed)
 - `src/mcp/server.ts` — MCP stdio server (generated from operations)
@@ -556,6 +569,21 @@ search engines, surfaced in cross-references, and distributed with every release
 - Example deal → `acme-seed`, `widget-series-a`
 - Example meeting → `meetings/2026-04-03` (generic date is fine)
 - Example user → `you` or `the user`, never a proper name
+
+**Specific rule: never say `Wintermute` in any CHANGELOG, README, doc, PR, or
+commit message.** When the temptation is to illustrate with the real fork name:
+- Reader-facing copy → `your OpenClaw` (covers Wintermute, Hermes, AlphaClaw,
+  and any other downstream OpenClaw deployment in one term the reader already
+  recognizes).
+- First-person / origin-story copy → `Garry's OpenClaw` (honest that this is
+  the production deployment driving the feature, without exposing the private
+  agent's name).
+
+`Wintermute` may appear in private artifacts (scratch plans under
+`~/.gstack/projects/…`, memory files, conversation transcripts, CEO-review
+plans) — those aren't distributed. Anything checked into this repo or shipped
+in a release must use the OpenClaw phrasing above. Sweeping a stale reference
+is a small clean-up PR, not a debate.
 
 **When in doubt, ask yourself:** "Would this query reveal private information
 about the user's contacts, investments, or portfolio if it were read by a
